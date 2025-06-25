@@ -1,0 +1,755 @@
+---
+title: "Code Compendium for Stull et al., 2025 - 'Growth and Development of the Cranial Complex and its Implications for Sex Estimation'"
+execute: 
+  warning: false
+  error: false
+format: 
+  html:
+    toc: true
+    embed-resources: true
+theme:
+  dark: Superhero
+  light: Yeti
+editor_options: 
+  chunk_output_type: console
+---
+
+This document lays out the necessary steps to complete all analyses associated with *Growth and Development of the Cranial Complex and its Implications for Sex Estimation* by Stull et al., 2025 and submitted to Forensic Science in July 2025.
+\
+
+# Environment Setup
+
+```{r packages}
+set.seed(1991)
+library(tidyverse)
+library(ggpubr)
+library(magrittr)
+library(MASS)
+library(ggsci)
+library(ggforce)
+library(ggpattern)
+library(ggpubr)
+library(patchwork)
+library(themis)
+library(caret)
+library(doParallel)
+num_cores <- parallel::detectCores() - 1  # Use all but one core
+
+# Register parallel backend
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+```
+
+# Import Data for Analyses
+\
+**Requests for access to the necessary data can be made to the corresponding author at <kstull@unr.edu>.**
+\
+
+## Subadult Data - SVAD
+
+```{r svad data}
+svad <- read.csv("data/SVAD_ILD_March2025_withPop.csv")
+
+svad_sub <- svad %>% dplyr::select(medrec, Age, Sex, Dev_LHS_2, Chron_LHS, GOL, NOL, BNL, BBH, XCB, WFB, ZYB, AUB, ASB, BPL, NPH, NLH_L, JUB, NLB, OBH_L, OBB_L, DKB, FMB, EKB, FRC, PAC, OCC, FOL, FOB, ancestry = Race) %>% mutate(sample = "SVAD", Dev_LHS_2 = recode(Dev_LHS_2, "adolescent" = "adolescence"), Chron_LHS = recode(Chron_LHS, "adolescent" = "adolescence"))
+```
+
+## Adult Data - FDB
+
+```{r fdb data}
+fdb_raw <- read.csv("data/FDB_edit_CLEAN_032025.csv")
+fdb_raw$Chron_LHS <- "Adulthood_FDB" # just to keep consistent with SVAD
+fdb_ancestry <- read.csv("data/fdb_ancestry.csv") # Keep ancestry for future.
+fdb <- inner_join(fdb_raw, fdb_ancestry, by = "medrec")
+
+fdb_sub <- fdb %>% dplyr::select(medrec, agey, sex, lh_stage_sample, Chron_LHS, GOL, NOL, BNL, BBH, XCB, WFB, ZYB, AUB, ASB, BPL, NPH, NLH_L, JUB, NLB, OBH_L, OBB_L, DKB, FMB, EKB, FRC, PAC, OCC, FOL, FOB, ancestry) %>% mutate(sample = "FDB")
+```
+
+# Prepare Files for Analyses
+
+## Join Files
+
+```{r joint data}
+colnames(fdb_sub) <- colnames(svad_sub)
+
+joint <- rbind(svad_sub, fdb_sub)
+# which(joint$medrec == 190)
+joint[181,4] <- "adolescence"
+# which(joint$medrec == 859)
+joint[858,4] <- "adolescence"
+
+joint %<>% mutate(Dev_LHS_2 = recode(Dev_LHS_2,"adult" = "adult_SVAD", "Adulthood_FDB" = "adult_FDB"), Chron_LHS = recode(Chron_LHS,"adult" = "adult_SVAD", "Adulthood_FDB" = "adult_FDB")) %>% na.omit()
+```
+
+## Downsample Adult Data
+
+Given the class imbalances in the FDB data set, we down sample to relatively equal proportions of males and females. 
+
+```{r downsample fdb}
+
+# Step 1: Get the count of `adult_SVAD` by Sex (M/F)
+adult_SVAD_count <- joint %>%
+  filter(Dev_LHS_2 == "adult_SVAD") %>%
+  count(Sex)
+
+# Step 2: Calculate the proportions of M/F in `adult_SVAD`
+prop_men_SVAD <- adult_SVAD_count$n[adult_SVAD_count$Sex == "M"] / sum(adult_SVAD_count$n)
+prop_women_SVAD <- adult_SVAD_count$n[adult_SVAD_count$Sex == "F"] / sum(adult_SVAD_count$n)
+
+# Step 3: Ensure `adult_FDB` has exactly 153 total (77 females, 76 males)
+target_men_FDB <- 76
+target_women_FDB <- 77
+
+# Step 4: Downsample `adult_FDB` to match the target M/F numbers
+adult_FDB_downsampled_M <- joint %>%
+  filter(Dev_LHS_2 == "adult_FDB", Sex == "M") %>%
+  sample_n(size = target_men_FDB, replace = FALSE)
+
+adult_FDB_downsampled_F <- joint %>%
+  filter(Dev_LHS_2 == "adult_FDB", Sex == "F") %>%
+  sample_n(size = target_women_FDB, replace = FALSE)
+
+# Step 5: Keep all other categories of `Dev_LHS_2` intact
+other_categories <- joint %>%
+  filter(!Dev_LHS_2 %in% c("adult_FDB", "adult_SVAD"))
+
+# Step 6: Combine the downsampled `adult_FDB` with `adult_SVAD` and other categories
+joint_balanced <- bind_rows(
+  adult_FDB_downsampled_M,
+  adult_FDB_downsampled_F,
+  filter(joint, Dev_LHS_2 == "adult_SVAD"),
+  other_categories
+)
+
+# Step 7: Check the final distribution
+table(joint_balanced$Dev_LHS_2, joint_balanced$Sex)
+```
+
+# Materials and Methods
+
+All code necessary to reproduce Figure 1, Figure 2, and the 3rd column in Table 1 can be found in this section.
+
+## Table 1 (Column 3)
+
+```{r table 1 numbers}
+joint_balanced %>% mutate(Dev_LHS_2 = factor(Dev_LHS_2, ordered = T, levels =  c("infancy", "childhood", "juvenile", "adolescence", "adult_SVAD", "adult_FDB"))) %>% group_by(Dev_LHS_2, Sex) %>% summarise(min = min(Age), max = max(Age), mean = mean(Age))
+```
+
+## Figure 1
+
+```{r Figure 1}
+#| fig-width: 8
+#| fig-height: 5
+
+joint_balanced %>% dplyr::select(Sex, Dev_LHS_2, GOL:FOB) %>% na.omit() %>% mutate(Dev_LHS_2 = fct_relevel(Dev_LHS_2, "infancy", "childhood", "juvenile", "adolescence", "adult_SVAD", "adult_FDB")) %>% ggplot(aes(x=Dev_LHS_2)) + geom_bar(aes(fill = Sex), position = "dodge") + geom_text(stat = "count", aes(label=after_stat(count),group=Sex), position = position_dodge(0.9), color="white", vjust=1.5) + labs(x="Life History Stage", y = "Count", fill= "Biological Sex") + scale_fill_manual(values = c("grey22", "grey78"), labels = c("Female","Male")) + theme(legend.position = c(.085, .935)) + scale_x_discrete(labels = c("infancy" = "Infancy", "childhood" = "Childhood", "juvenile" = "Juvenile", "adolescence" = "Adolescence", "adult_SVAD" = "Adulthood_SVAD", "adult_FDB" = "Adulthood_FDB")) + theme_classic()
+
+ggsave("Fig1_FINAL.png", units = "in", height = 5, width = 8)
+```
+
+## Figure 2
+
+```{r Figure 2}
+#| fig-width: 8
+#| fig-height: 5
+
+a <- joint_balanced %>% filter(sample == "SVAD") %>% dplyr::select(Sex, Dev_LHS_2, GOL:FOB) %>% na.omit() %>% mutate(Dev_LHS_2 = fct_relevel(Dev_LHS_2, "infancy", "childhood", "juvenile", "adolescence", "adult_SVAD")) %>% ggplot(aes(x=Sex)) + geom_bar(aes(fill = Dev_LHS_2), position = "dodge") + labs(title = "Developmentally-Derived",x="Biological Sex", y = "Count") + scale_fill_npg(labels = c("infancy" = "Infancy", "childhood" = "Childhood", "juvenile" = "Juvenile", "adolescence" = "Adolescence", "adult_SVAD" = "Adulthood_SVAD")) + theme_classic() +theme(legend.position = "none") + theme(legend.title = element_blank())
+
+b <- joint_balanced %>% filter(sample == "SVAD") %>% dplyr::select(Sex, Chron_LHS, GOL:FOB) %>% na.omit() %>% mutate(Chron_LHS = fct_relevel(Chron_LHS, "infancy", "childhood", "juvenile", "adolescence", "adult_SVAD")) %>% ggplot(aes(x=Sex)) + geom_bar(aes(fill = Chron_LHS), position = "dodge") + labs(title = "Chronologically-Derived",x="Biological Sex", y = "Count") + scale_fill_npg(labels = c("infancy" = "Infancy", "childhood" = "Childhood", "juvenile" = "Juvenile", "adolescence" = "Adolescence", "adult_SVAD" = "Adulthood_SVAD")) + theme_classic() +theme(legend.position = "bottom") + theme(legend.title = element_blank())
+
+ggarrange(a,b, ncol = 1)
+
+ggsave("Fig2_FINAL.png", width = 8, height = 5, units = "in")
+```
+
+# Results + Discussion
+
+All code necessary to reproduce Figures 3-8 and Tables 3-9 can be found in this sections. 
+\
+Note, all linear discriminant analyses are run in parallel for computational efficiency. This can be adjust based on user specifications and needs. 
+
+## Life History Stage Exploration
+
+All life history models are fit with Linear Discriminant Analyses with validation completed using Leave-One-Out Cross-Validation.
+
+### Model Fit - SVAD
+
+```{r lda lh svad}
+svad_lh__lda_dat <- joint_balanced %>% filter(sample == "SVAD") %>% dplyr::select(Dev_LHS_2, GOL:FOB) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Dev_LHS_2 = factor(Dev_LHS_2, ordered = T, levels = c("infancy", "childhood", "juvenile", "adolescence", "adult_SVAD") ))
+
+lda_svad_lh <- train(Dev_LHS_2 ~ ., data = svad_lh__lda_dat, method = "lda", trControl = trainControl(method = "LOOCV", allowParallel = T), priors = c(0.2,0.2,0.2,0.2,0.2))
+```
+
+### Model Summary - SVAD
+
+```{r lda lh svad summary}
+lda_svad_lh$finalModel
+
+lda_svad_lh_pred <- lda_svad_lh$pred
+conf_matrix <- confusionMatrix(lda_svad_lh_pred$pred, lda_svad_lh_pred$obs)
+```
+
+### Table 3
+
+```{r svad lh mahal}
+
+# Extract class means
+class_means_svad <- lda_svad_lh$finalModel$means 
+
+# Compute the pooled covariance matrix from raw data
+pooled_cov_svad_lh <- var(svad_lh__lda_dat[, colnames(class_means_svad)])  # Use only predictor variables
+
+# Number of classes
+num_classes <- nrow(class_means_svad)
+
+# Compute Mahalanobis distance between centroids
+mahal_dist_centroids_svad_lh <- matrix(NA, nrow = num_classes, ncol = num_classes)
+
+for (i in 1:num_classes) {
+  for (j in 1:num_classes) {
+    mahal_dist_centroids_svad_lh[i, j] <- mahalanobis(
+      class_means_svad[i, ], 
+      center = class_means_svad[j, ], 
+      cov = pooled_cov_svad_lh
+    )
+  }
+}
+
+# Convert to a named matrix
+rownames(mahal_dist_centroids_svad_lh) <- colnames(mahal_dist_centroids_svad_lh) <- rownames(class_means_svad)
+
+# print(mahal_dist_centroids)
+
+mal_cent_svad_lh <- mahal_dist_centroids_svad_lh
+mal_cent_svad_lh
+write.csv(mal_cent_svad_lh, "Table3.csv", row.names = T)
+```
+
+### Table 4
+
+```{r table 4}
+print(conf_matrix$table)
+write.csv(conf_matrix$table, "Table4.csv", row.names = T)
+```
+
+### Figure 3
+
+```{r CVA prep svad lh}
+CVA_scores <- svad_lh__lda_dat %>% mutate(Dev_LHS_2 = factor(Dev_LHS_2)) %>% {as.matrix(dplyr::select(., rownames(lda_svad_lh$finalModel$scaling))) %*% lda_svad_lh$finalModel$scaling} %>% as.data.frame
+
+CVA_scores$stage <- svad_lh__lda_dat %>% dplyr::select(Dev_LHS_2) %>% mutate(Dev_LHS_2 = factor(Dev_LHS_2, ordered = TRUE, levels = c("infancy", "childhood", "juvenile", "adolescence", "adult_SVAD"))) %>% pull(Dev_LHS_2)
+```
+
+```{r ellipse prep}
+chi2 = qchisq(0.05,2, lower.tail=FALSE)
+
+CIregions.mean.and.pop <-
+  CVA_scores %>%
+  group_by(stage) %>%
+  summarize(CV1.mean = mean(LD1),
+            CV2.mean = mean(LD2),
+            mean.radii = sqrt(chi2/n()),
+            popn.radii = sqrt(chi2))
+```
+
+```{r CVA plot svad lh}
+ggplot() + geom_point(data = CVA_scores, mapping = aes(x = LD1, y = LD2, color = stage)) + labs(x = "CV1", y = "CV2") + coord_fixed(ratio=1) + geom_circle(data = CIregions.mean.and.pop, mapping = aes(x0=CV1.mean,y0=CV2.mean,r=popn.radii, color=stage), linetype = "dashed", inherit.aes = F, size = 1.25,show.legend = FALSE) + labs(x = "CV1",y = "CV2", color = "Life History Stage") + scale_x_continuous(breaks = seq(-10,7,1)) + scale_color_npg(labels = c("infancy" = "Infancy", "childhood" = "Childhood", "juvenile" = "Juvenile", "adolescence" = "Adolescence", "adult_SVAD" = "Adulthood_SVAD")) + theme_bw() + theme(legend.position = "bottom", legend.title = element_blank())
+
+ggsave("Fig3_FINAL.png", units = "in", height = 5, width = 8)
+```
+
+### Model Fit - SVAD + FDB
+
+```{r lda lh svad and FDB}
+comb_lh_lda_dat <- joint_balanced %>% dplyr::select(Dev_LHS_2, GOL:FOB) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Dev_LHS_2 = factor(Dev_LHS_2, ordered = TRUE, levels = c("infancy", "childhood", "juvenile", "adolescence", "adult_SVAD", "adult_FDB")))
+
+lda_comb_lh <- train(Dev_LHS_2 ~ ., data = comb_lh_lda_dat, method = "lda", trControl = trainControl(method = "LOOCV", allowParallel = T), priors = c(1/6,1/6,1/6,1/6,1/6))
+```
+
+### Table 6
+
+```{r lda lh svad fdb summary}
+lda_comb_lh$finalModel
+
+lda_comb_lh_pred <- lda_comb_lh$pred
+conf_matrix <- confusionMatrix(lda_comb_lh_pred$pred, lda_comb_lh_pred$obs)
+print(conf_matrix$table)
+write.csv(conf_matrix$table, "Table6.csv", row.names = T)
+```
+
+### Table 5
+
+```{r svad fdb lh mahal}
+
+# Extract class means
+class_means_comb <- lda_comb_lh$finalModel$means 
+
+# Compute the pooled covariance matrix from raw data
+pooled_cov_comb_lh <- var(comb_lh_lda_dat[, colnames(class_means_comb)])  # Use only predictor variables
+
+# Number of classes
+num_classes <- nrow(class_means_comb)
+
+# Compute Mahalanobis distance between centroids
+mahal_dist_centroids_comb_lh <- matrix(NA, nrow = num_classes, ncol = num_classes)
+
+for (i in 1:num_classes) {
+  for (j in 1:num_classes) {
+    mahal_dist_centroids_comb_lh[i, j] <- mahalanobis(
+      class_means_comb[i, ], 
+      center = class_means_comb[j, ], 
+      cov = pooled_cov_comb_lh
+    )
+  }
+}
+
+# Convert to a named matrix
+rownames(mahal_dist_centroids_comb_lh) <- colnames(mahal_dist_centroids_comb_lh) <- rownames(class_means_comb)
+
+# print(mahal_dist_centroids)
+
+mal_cent_comb_lh <- mahal_dist_centroids_comb_lh
+mal_cent_comb_lh
+write.csv(mal_cent_comb_lh, "Table5.csv", row.names = T)
+```
+
+### Figure 4
+
+```{r CVA prep svad fdb lh}
+CVA_scores <- comb_lh_lda_dat %>% {as.matrix(dplyr::select(., rownames(lda_comb_lh$finalModel$scaling))) %*% lda_comb_lh$finalModel$scaling} %>% as.data.frame
+
+CVA_scores$stage <- comb_lh_lda_dat %>% dplyr::select(Dev_LHS_2) %>% mutate(Dev_LHS_2 = factor(Dev_LHS_2, ordered = TRUE, levels = c("infancy", "childhood", "juvenile", "adolescence", "adult_SVAD", "adult_FDB"))) %>% pull(Dev_LHS_2)
+```
+
+```{r ellipse fdb prep}
+chi2 = qchisq(0.05,2, lower.tail=FALSE)
+
+CIregions.mean.and.pop <-
+  CVA_scores %>%
+  group_by(stage) %>%
+  summarize(CV1.mean = mean(LD1),
+            CV2.mean = mean(LD2),
+            mean.radii = sqrt(chi2/n()),
+            popn.radii = sqrt(chi2))
+```
+
+```{r CVA plot svad fdb lh}
+ggplot() + geom_point(data = CVA_scores, mapping = aes(x = LD1, y = LD2, color = stage)) + labs(x = "CV1", y = "CV2") + coord_fixed(ratio=1) + geom_circle(data = CIregions.mean.and.pop, mapping = aes(x0=CV1.mean,y0=CV2.mean,r=popn.radii, color=stage), linetype = "dashed", inherit.aes = F, size = 1.25,show.legend = FALSE) + labs(x = "CV1",y = "CV2", color = "Life History Stage") + scale_x_continuous(breaks = seq(-10,5,1)) + scale_color_npg(labels = c("infancy" = "Infancy", "childhood" = "Childhood", "juvenile" = "Juvenile", "adolescence" = "Adolescence", "adult_SVAD" = "Adulthood_SVAD", "adult_FDB" = "Adulthood_FDB")) + theme_bw() + theme(legend.position = "bottom", legend.title = element_blank())
+
+ggsave("Fig4_FINAL.png", units = "in", width = 8, height = 5)
+```
+
+### Figure 8
+
+```{r discussion cva prep}
+temp_dat <- joint_balanced %>% dplyr::select(medrec, Sex, Dev_LHS_2, GOL:FOB) %>% na.omit() %>% mutate(Dev_LHS_2 = factor(Dev_LHS_2, ordered = TRUE, levels = c("infancy", "childhood", "juvenile", "adolescence", "adult_SVAD", "adult_FDB")))
+
+# Here I hard code the medrecs where M2 development is at least 'Root Complete'. This could also be done by combining datasets between craniometrics + ontogenetic variables and filtering. 
+
+temp_dat %<>% dplyr::select(1,2,3,4)
+new <- cbind(temp_dat, CVA_scores)
+m886 <- which(new$medrec == 886)
+m916 <- which(new$medrec == 916)
+m725 <- which(new$medrec == 725)
+m618 <- which(new$medrec == 618)
+m613 <- which(new$medrec == 613)
+m312 <- which(new$medrec == 312)
+m174 <- which(new$medrec == 174)
+m883 <- which(new$medrec == 883)
+m316 <- which(new$medrec == 316)
+m919 <- which(new$medrec == 919)
+```
+
+```{r discussion cva plot 1}
+ggplot() + geom_point(data = CVA_scores, mapping = aes(x = LD1, y = LD2, color = stage)) + coord_fixed(ratio=1) + geom_circle(data = CIregions.mean.and.pop, mapping = aes(x0=CV1.mean,y0=CV2.mean,r=popn.radii, color=stage), linetype = "dashed", inherit.aes = F, size = 1.25,show.legend = FALSE) + labs(x = "CV1",y = "CV2", color = "Life History Stage") + scale_x_continuous(breaks = seq(-10,5,1)) + scale_color_npg(alpha=0.55) + theme_bw() + theme(legend.position = "bottom", legend.title = element_blank()) + geom_point(new[c(m886,m916, m725),], mapping=aes(x = LD1, y = LD2), colour = "black", pch = 17, size=3) + geom_point(new[c(m618,m613,m312),], mapping=aes(x = LD1, y = LD2), colour = "black", size=3)
+```
+
+```{r discussion cva plot 2}
+ggplot() + geom_point(data = CVA_scores, mapping = aes(x = LD1, y = LD2, color = stage)) + coord_fixed(ratio=1) + geom_circle(data = CIregions.mean.and.pop, mapping = aes(x0=CV1.mean,y0=CV2.mean,r=popn.radii, color=stage), linetype = "dashed", inherit.aes = F, size = 1.25,show.legend = FALSE) + labs(x = "CV1",y = "CV2", color = "Life History Stage") + scale_x_continuous(breaks = seq(-10,5,1)) + scale_color_npg(labels = c("infancy" = "Infancy", "childhood" = "Childhood", "juvenile" = "Juvenile", "adolescence" = "Adolescence", "adult_SVAD" = "Adulthood_SVAD", "adult_FDB" = "Adulthood_FDB"), alpha =  0.55) + theme_bw() + theme(legend.position = "bottom", legend.title = element_blank()) + geom_point(new[c(m886,m916, m725,m174,m883),], mapping=aes(x = LD1, y = LD2), colour = "black", pch = 17, size=3) + geom_point(new[c(m618,m613,m312,m316,m919),], mapping=aes(x = LD1, y = LD2), colour = "black", size=3)
+
+ggsave("Figure8_FINAL.png", units = "in", width = 8, height = 5, bg = "white")
+```
+
+### Figure 7
+
+```{r}
+m2 <- svad %>% filter(m2 >= 11) %>% dplyr::select(medrec)
+```
+
+```{r}
+m2_sub <- joint_balanced[joint_balanced$medrec %in% m2$medrec,]
+```
+
+```{r}
+svad_sub2 <- m2_sub %>% dplyr::select(Sex,Dev_LHS_2, Chron_LHS) %>% droplevels() %>% mutate(Dev_LHS_2 = factor(Dev_LHS_2, ordered = TRUE, levels = c("juvenile", "adolescence", "adult_SVAD"), labels = c("Juvenile","Adolescence","Adulthood_SVAD")), Chron_LHS = factor(Chron_LHS, ordered = TRUE, levels = c("juvenile", "adolescence", "adult_SVAD"),labels = c("Juvenile","Adolescence","Adulthood_SVAD")))
+```
+
+```{r}
+dev_lhs <- svad_sub2 %>% ggplot(aes(x = Dev_LHS_2, fill = Sex)) + geom_bar(position = "dodge") + scale_fill_manual(values = c("grey22", "grey78"), labels = c("Female","Male")) + xlab("Developmental LHS") + theme_minimal()
+
+chron_lhs <- svad_sub2 %>% dplyr::select(Sex, Chron_LHS) %>% na.omit() %>% ggplot(aes(x = Chron_LHS, fill = Sex)) + geom_bar(position = "dodge") + scale_fill_manual(values = c("grey22", "grey78"), labels = c("Female","Male")) + xlab("Chronological LHS") + theme_minimal()
+
+```
+
+```{r}
+ggarrange(dev_lhs, chron_lhs, ncol = 2, legend = "bottom", common.legend = T)
+
+ggsave("Figure7_FINAL.png", units = "in", width = 8, height = 5, bg = "white")
+```
+
+## Biological Sex Estimation
+
+Figure 5 and Table 7-9 are a combination of values from each individual model below. There is no section labelled "Table 7" for example, but a user can reproduce the table values by running each individual model.
+\
+All sex estimation models are fit with a forward step wise LDA algorithm and leave-one-out cross validation.
+
+### Infancy
+
+```{r infancy model prep}
+infancy_dat <- joint_balanced %>% filter(sample == "SVAD", Dev_LHS_2 == "infancy") %>% dplyr::select(Sex,Age ,GOL:FOB) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Sex = factor(Sex))
+```
+
+```{r infancy model}
+## Stepwise model
+
+lda_infancy <- train(Sex ~ ., data = infancy_dat, method = "stepLDA", trControl = trainControl(method = "LOOCV", allowParallel = TRUE), tuneGrid = data.frame(maxvar = 24, direction = "forward"))
+
+lda_infancy$finalModel
+
+
+infancy_preds <- lda_infancy$pred
+infancy_conf_matrix <- confusionMatrix(infancy_preds$pred, infancy_preds$obs)
+infancy_conf_matrix
+inf_accuracy <- infancy_conf_matrix$overall["Accuracy"]
+print(infancy_conf_matrix$table)
+```
+
+### Childhood
+
+```{r child model prep}
+child_dat <- joint_balanced %>% filter(sample == "SVAD", Dev_LHS_2 == "childhood") %>% dplyr::select(Sex,Age, GOL:FOB) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Sex = factor(Sex))
+```
+
+```{r child model}
+## Stepwise model
+
+lda_child <- train(Sex ~ ., data = child_dat, method = "stepLDA", trControl = trainControl(method = "LOOCV", allowParallel = TRUE), tuneGrid = data.frame(maxvar = 24, direction = "forward"))
+
+lda_child$finalModel
+
+
+child_preds <- lda_child$pred
+child_conf_matrix <- confusionMatrix(child_preds$pred, child_preds$obs)
+child_conf_matrix
+child_accuracy <- child_conf_matrix$overall["Accuracy"]
+print(child_conf_matrix$table)
+```
+
+### Juvenile
+
+```{r juvenile model prep}
+juv_dat <- joint_balanced %>% filter(sample == "SVAD", Dev_LHS_2 == "juvenile") %>% dplyr::select(Sex,Age, GOL:FOB) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Sex = factor(Sex))
+```
+
+```{r juvenile model}
+## Stepwise model
+
+lda_juv <- train(Sex ~ ., data = juv_dat, method = "stepLDA", trControl = trainControl(method = "LOOCV", allowParallel = TRUE), tuneGrid = data.frame(maxvar = 24, direction = "forward"))
+
+lda_juv$finalModel
+
+
+juv_preds <- lda_juv$pred
+juv_conf_matrix <- confusionMatrix(juv_preds$pred, juv_preds$obs)
+juv_conf_matrix
+juv_accuracy <- juv_conf_matrix$overall["Accuracy"]
+print(juv_conf_matrix$table)
+```
+
+### Adolescence
+
+```{r adol model prep}
+adol_dat <- joint_balanced %>% filter(sample == "SVAD", Dev_LHS_2 == "adolescence") %>% dplyr::select(Sex,Age, GOL:FOB) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Sex = factor(Sex))
+```
+
+```{r adol model}
+## Stepwise model
+
+lda_adol <- train(Sex ~ ., data = adol_dat, method = "stepLDA", trControl = trainControl(method = "LOOCV", allowParallel = TRUE), tuneGrid = data.frame(maxvar = 24, direction = "forward"))
+
+lda_adol$finalModel
+
+
+adol_preds <- lda_adol$pred
+adol_conf_matrix <- confusionMatrix(adol_preds$pred, adol_preds$obs)
+adol_conf_matrix
+adol_accuracy <- adol_conf_matrix$overall["Accuracy"]
+print(adol_conf_matrix$table)
+```
+
+```{r class errors adols code}
+#### Classification Errors Code!
+preds_adols <- lda_adol$pred
+
+lh <- joint_balanced %>% filter(sample == "SVAD", Dev_LHS_2 %in% c("adolescence")) %>% dplyr::select(Age,Sex, Dev_LHS_2 ,GOL:FOB) %>% na.omit()
+
+preds_adols$lh <- lh$Dev_LHS_2
+preds_adols$age <- lh$Age
+preds_adols$Sex <- lh$Sex
+
+preds_adols %<>% mutate(correct = ifelse(pred == obs, "correct", "wrong"))
+
+preds_adols %>% group_by(obs, pred, lh) %>% summarise(count = n())
+```
+
+```{r}
+## Counts
+adol_count <- ggplot(preds_adols, aes(x=age ,fill=correct)) + geom_histogram(boundary = 11, binwidth = 1) +  facet_grid(Sex ~ .) + scale_fill_manual(values=c("navy", "purple"), labels = c("Correct", "Incorrect")) + labs(fill = "Prediction Outcome") + scale_x_continuous(breaks = seq(11,21,1)) + xlab("Age") + ylab("Count") + theme_minimal()
+
+adol_count2 <- ggplot(preds_adols, aes(x=age ,fill=correct)) + geom_histogram(boundary = 11, binwidth = 1) +  facet_grid(Sex ~ .) + scale_fill_manual(values=c("navy", "purple"), labels = c("Correct", "Incorrect")) + labs(fill = "Prediction Outcome") + scale_x_continuous(breaks = seq(11,21,1)) + xlab("Age") + ylab("Count") + guides(fill = "none") + theme_minimal()
+
+adol_count
+
+# ggsave("adol_misclass_count.png", plot = adol_count ,units = "in", width = 8, height = 5)
+```
+
+```{r}
+## Density
+adol_density <- ggplot(preds_adols, aes(x=age ,fill=correct)) + geom_density() + facet_grid(Sex ~ .) + scale_fill_manual(values=c("navy", "purple"), labels = c("Correct", "Incorrect")) + labs(fill = "Prediction Outcome")  + scale_x_continuous(breaks = seq(11,21,1), limits = c(11,21)) + xlab("Age") + ylab("Density") + theme_minimal()
+
+adol_density
+
+# ggsave("adol_misclass_density.png", plot = adol_density ,units = "in", width = 8, height = 5)
+```
+
+
+### SVAD Adults
+
+```{r svad adults model prep}
+svad_adult_dat <- joint_balanced %>% filter(sample == "SVAD", Dev_LHS_2 == "adult_SVAD") %>% dplyr::select(Sex,Age, GOL:FOB) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Sex = factor(Sex))
+```
+
+```{r svad adult model}
+## Stepwise model
+
+lda_svad_adult <- train(Sex ~ ., data = svad_adult_dat, method = "stepLDA", trControl = trainControl(method = "LOOCV", allowParallel = TRUE), tuneGrid = data.frame(maxvar = 24, direction = "forward"))
+
+lda_svad_adult$finalModel
+
+
+svad_adult_preds <- lda_svad_adult$pred
+svad_adult_conf_matrix <- confusionMatrix(svad_adult_preds$pred, svad_adult_preds$obs)
+svad_adult_conf_matrix
+svad_adult_accuracy <- svad_adult_conf_matrix$overall["Accuracy"]
+print(svad_adult_conf_matrix$table)
+```
+
+```{r class errors adult code}
+#### Classification Errors Code!
+preds_svad_adult <- lda_svad_adult$pred
+
+lh <- joint_balanced %>% filter(sample == "SVAD", Dev_LHS_2 %in% c("adult_SVAD")) %>% dplyr::select(Age,Sex, Dev_LHS_2 ,GOL:FOB) %>% na.omit()
+
+preds_svad_adult$lh <- lh$Dev_LHS_2
+preds_svad_adult$age <- lh$Age
+preds_svad_adult$Sex <- lh$Sex
+
+preds_svad_adult %<>% mutate(correct = ifelse(pred == obs, "correct", "wrong"))
+
+preds_svad_adult %>% group_by(obs, pred, lh) %>% summarise(count = n())
+```
+
+```{r}
+ggplot(preds_svad_adult, aes(x=age, fill=correct)) + geom_histogram() + theme_minimal() + facet_grid(Sex ~ .) + scale_fill_manual(values=c("navy", "purple")) + labs(fill = "Sex Estimation", title="Adult Sex Estimation Model")
+```
+
+### SVAD Adolescence and Adults
+
+```{r svad old model prep}
+svad_old_dat <- joint_balanced %>% filter(sample == "SVAD", Dev_LHS_2 %in% c("adolescence", "adult_SVAD")) %>% dplyr::select(Sex, GOL:FOB) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Sex = factor(Sex))
+```
+
+```{r dvad old model}
+## Stepwise model
+
+lda_svad_old <- train(Sex ~ ., data = svad_old_dat, method = "stepLDA", trControl = trainControl(method = "LOOCV", allowParallel = TRUE), tuneGrid = data.frame(maxvar = 24, direction = "forward"))
+
+lda_svad_old$finalModel
+
+
+svad_old_preds <- lda_svad_old$pred
+svad_old_conf_matrix <- confusionMatrix(svad_old_preds$pred, svad_old_preds$obs)
+svad_old_conf_matrix
+svad_old_accuracy <- svad_old_conf_matrix$overall["Accuracy"]
+print(svad_old_conf_matrix$table)
+```
+
+```{r class errors adols adults code}
+#### Classification Errors Code!
+preds_svad_old <- lda_svad_old$pred
+
+lh <- joint_balanced %>% filter(sample == "SVAD", Dev_LHS_2 %in% c("adolescence", "adult_SVAD")) %>% dplyr::select(Age,Sex, Dev_LHS_2 ,GOL:FOB) %>% na.omit()
+
+preds_svad_old$lh <- lh$Dev_LHS_2
+preds_svad_old$age <- lh$Age
+preds_svad_old$Sex <- lh$Sex
+
+preds_svad_old %<>% mutate(correct = ifelse(pred == obs, "correct", "wrong"))
+
+preds_svad_old %>% group_by(obs, pred, lh) %>% summarise(count = n())
+```
+
+```{r}
+## Count
+adol_adult_count <- ggplot(preds_svad_old, aes(x=age, fill=correct)) + geom_histogram(boundary = 11, binwidth = 1) + theme_minimal() + facet_grid(Sex ~ .) + scale_fill_manual(values=c("navy", "purple"), labels = c("Correct", "Incorrect")) + labs(fill = "Prediction Outcome") + scale_x_continuous(breaks = seq(11,21,1), limits = c(11,21)) + xlab("Age") + ylab("Count")
+
+adol_adult_count2 <- ggplot(preds_svad_old, aes(x=age, fill=correct)) + geom_histogram(boundary = 11, binwidth = 1) + theme_minimal() + facet_grid(Sex ~ .) + scale_fill_manual(values=c("navy", "purple"), labels = c("Correct", "Incorrect")) + labs(fill = "Prediction Outcome") + scale_x_continuous(breaks = seq(11,21,1), limits = c(11,21)) + xlab("Age") + ylab("Count") + guides(fill = "none")
+
+adol_adult_count
+
+# ggsave("adol_adult_misclass_count.png", plot = adol_adult_count, units = "in", width = 8, height = 5)
+```
+
+```{r}
+## Density
+adol_adult_density <- ggplot(preds_svad_old, aes(x=age, fill=correct)) + geom_density() + theme_minimal() + facet_grid(Sex ~ .) + scale_fill_manual(values=c("navy", "purple"),labels = c("Correct", "Incorrect")) + labs(fill = "Prediction Outcome") + scale_x_continuous(breaks = seq(11,21,1),limits = c(11,21)) + xlab("Age") + ylab("Density")
+
+adol_adult_density2 <- ggplot(preds_svad_old, aes(x=age, fill=correct)) + geom_density() + theme_minimal() + facet_grid(Sex ~ .) + scale_fill_manual(values=c("navy", "purple"),labels = c("Correct", "Incorrect")) + labs(fill = "Prediction Outcome") + scale_x_continuous(breaks = seq(11,21,1),limits = c(11,21)) + xlab("Age") + ylab("Density") + guides(fill = "none")
+
+adol_adult_density
+
+# ggsave("adol_adult_misclass_density.png", plot = adol_adult_density, units = "in", width = 8, height = 5)
+```
+
+### SVAD All
+
+```{r svad all model prep}
+svad_all_dat <- joint_balanced %>% filter(sample == "SVAD") %>% dplyr::select(Sex, GOL:FOB) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Sex = factor(Sex))
+
+svad_all_dat2 <- joint_balanced %>% filter(sample == "SVAD") %>% dplyr::select(Sex, GOL:FOB, Age, Dev_LHS_2) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Sex = factor(Sex))
+```
+
+```{r svad all model}
+## Stepwise model
+
+lda_svad_all <- train(Sex ~ ., data = svad_all_dat, method = "stepLDA", trControl = trainControl(method = "LOOCV", allowParallel = TRUE), tuneGrid = data.frame(maxvar = 24, direction = "forward"))
+
+lda_svad_all$finalModel
+
+
+svad_all_preds <- lda_svad_all$pred
+svad_all_conf_matrix <- confusionMatrix(svad_all_preds$pred, svad_all_preds$obs)
+svad_all_conf_matrix
+svad_all_accuracy <- svad_all_conf_matrix$overall["Accuracy"]
+print(svad_all_conf_matrix$table)
+
+svad_all_preds$age <- svad_all_dat2$Age
+svad_all_preds$Sex <- svad_all_dat2$Sex
+
+svad_all_preds %<>% mutate(correct = ifelse(pred == obs, "correct", "wrong"))
+```
+
+```{r}
+svad_all_count <- ggplot(svad_all_preds, aes(x=age, fill=correct)) + geom_histogram() + theme_minimal() + facet_grid(Sex ~ .) + scale_fill_manual(values=c("navy", "purple"), labels = c("Correct", "Incorrect")) + labs(fill = "Prediction Outcome") + scale_x_continuous(breaks = seq(0,21,1)) + xlab("Age") + ylab("Count")
+
+svad_all_count2 <- ggplot(svad_all_preds, aes(x=age, fill=correct)) + geom_histogram(boundary = 0) + theme_minimal() + facet_grid(Sex ~ .) + scale_fill_manual(values=c("navy", "purple"), labels = c("Correct", "Incorrect")) + labs(fill = "Prediction Outcome") + scale_x_continuous(breaks = seq(0,21,1), limits = c(0,21)) + xlab("Age") + ylab("Count") + guides(fill = "none")
+
+svad_all_count
+
+# ggsave("svad_all_missclass_count.png", plot = svad_all_count, units = "in", width = 8, height = 5)
+```
+
+```{r}
+svad_all_density <- ggplot(svad_all_preds, aes(x=age, fill=correct)) + geom_density() + theme_minimal() + facet_grid(Sex ~ .) + scale_fill_manual(values=c("navy", "purple"), labels = c("Correct", "Incorrect")) + labs(fill = "Prediction Outcome") + scale_x_continuous(breaks = seq(0,21,1), limits = c(0,21)) + xlab("Age") + ylab("Count")
+
+svad_all_density
+
+# ggsave("svad_all_missclass_density.png", plot = svad_all_density, units = "in", width = 8, height = 5)
+```
+
+```{r}
+combined_svad <- svad_all_count2 / svad_all_density + plot_layout(guides = "collect") + plot_annotation(tag_levels = 'A') & theme(legend.position = "bottom")
+
+# ggsave(filename = "SVAD_all_misclass_combined.png", plot = combined_svad, units = "in", height = 9, width = 6)
+```
+
+### FDB Adults
+
+```{r fdb model prep}
+fdb_dat <- joint_balanced %>% filter(sample == "FDB") %>% dplyr::select(Sex, GOL:FOB) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Sex = factor(Sex))
+```
+
+```{r fdb model}
+## Stepwise model
+
+lda_fdb <- train(Sex ~ ., data = fdb_dat, method = "stepLDA", trControl = trainControl(method = "LOOCV", allowParallel = TRUE), tuneGrid = data.frame(maxvar = 24, direction = "forward"))
+
+lda_fdb$finalModel
+
+
+fdb_preds <- lda_fdb$pred
+fdb_conf_matrix <- confusionMatrix(fdb_preds$pred, fdb_preds$obs)
+fdb_conf_matrix
+fdb_accuracy <- fdb_conf_matrix$overall["Accuracy"]
+print(fdb_conf_matrix$table)
+```
+
+### FDB Adults + SVAD Adolescence & Adults
+
+```{r svad fdb model prep}
+svad_fdb_dat <- joint_balanced %>% filter(Dev_LHS_2 %in% c("adolescence", "adult_SVAD", "adult_FDB")) %>% dplyr::select(Sex, GOL:FOB) %>% na.omit() %>% mutate(across(GOL:FOB, scale), Sex = factor(Sex))
+```
+
+```{r svad fdb model}
+## Stepwise model
+
+lda_svad_fdb <- train(Sex ~ ., data = svad_fdb_dat, method = "stepLDA", trControl = trainControl(method = "LOOCV", allowParallel = TRUE), tuneGrid = data.frame(maxvar = 24, direction = "forward"))
+
+lda_svad_fdb$finalModel
+
+
+svad_fdb_preds <- lda_svad_fdb$pred
+svad_fdb_conf_matrix <- confusionMatrix(svad_fdb_preds$pred, svad_fdb_preds$obs)
+svad_fdb_conf_matrix 
+svad_fdb_accuracy <- svad_fdb_conf_matrix$overall["Accuracy"]
+print(svad_fdb_conf_matrix$table)
+```
+
+### Figure 6
+
+```{r}
+combined <- adol_count2 / adol_density / adol_adult_count2 / adol_adult_density2 + plot_layout(guides = "collect") + plot_annotation(tag_levels = 'A') & theme(legend.position = "bottom")
+
+combined
+
+ggsave(filename = "Figure6_FINAL.png", plot = combined, units = "in", height = 10, width = 7.5, bg = "white")
+```
+
+### Figure 5
+
+```{r sex summary}
+sex_acc <- tibble(
+  Model = c("SVAD ALL","INF", "CHILD", "JUV", "ADOL", "ADULT", "ADOL + ADULT", "FDB", "FDB + SVAD" ),
+    Accuracy = c(svad_all_accuracy, inf_accuracy, child_accuracy, juv_accuracy, adol_accuracy, svad_adult_accuracy, svad_old_accuracy, fdb_accuracy, svad_fdb_accuracy )
+)
+
+sex_acc$Model <- factor(sex_acc$Model, ordered = T, levels = c("SVAD ALL", "INF", "CHILD", "JUV", "ADOL", "ADULT", "ADOL + ADULT", "FDB", "FDB + SVAD"))
+
+```
+
+```{r sex summary plot}
+ggplot(sex_acc, aes(x=Model,y=Accuracy)) + geom_col() + labs(x="Model", y = "Accuracy %") + scale_y_continuous(breaks = seq(0.0,.95,0.05)) + theme_bw()
+
+ggsave("Fig5_V2.png", units = "in", width = 8, height = 5, bg = "white")
+```
+
+# Postscript
+
+```{r}
+stopCluster(cl)
+registerDoSEQ()  # Return to sequential processing
+```
+
+```{r}
+version
+```
+
+##################################END###########################################
