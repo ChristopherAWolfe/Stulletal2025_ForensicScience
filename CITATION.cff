@@ -3,7 +3,8 @@ message: "If you use this software, please cite it as below."
 authors:
 - family-names: "Wolfe"
   given-names: "C. A."
-orcid: https://orcid.org/0000-0001-9554-1683
+- family-names: "Stull"
+  given-names: "K. E."
 title: "ChristopherAWolfe/Stulletal2025_ForensicScience: Code Compendium"
 version: v1.0.0
 doi: 10.5281/zenodo.15741672
