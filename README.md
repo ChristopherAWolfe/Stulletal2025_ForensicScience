@@ -9,7 +9,7 @@ For a full reproduction of the code and results in one's own environment, users 
 
 ### How to Cite:
 
-> Wolfe, C.A. (2024). ChristopherAWolfe/Stulletal2025_ForensicScience: Code Compendium (v1.0). Zenodo.
+> Wolfe, C. A., & Stull, K. E. (2025). ChristopherAWolfe/Stulletal2025_ForensicScience: Code Compendium (Version v1.0.0) [Computer software]. https://doi.org/10.5281/zenodo.15741672
 
 # Timestamp
 
